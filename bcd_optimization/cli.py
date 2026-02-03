@@ -27,8 +27,8 @@ Examples:
     parser.add_argument(
         "--target",
         type=int,
-        default=23,
-        help="Target gate input count to beat (default: 23)",
+        default=61,
+        help="Target gate input count to beat (default: 61, the no-sharing baseline)",
     )
     parser.add_argument(
         "--exact",

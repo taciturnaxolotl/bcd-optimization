@@ -132,7 +132,7 @@ class BCDTo7SegmentSolver:
         cost_breakdown = self._compute_cost_breakdown(selected, implicants_by_output)
 
         return SynthesisResult(
-            cost=cost_breakdown.and_inputs,  # Primary cost = AND inputs only
+            cost=cost_breakdown.total,  # Total = AND inputs + OR inputs
             implicants_by_output=implicants_by_output,
             shared_implicants=shared,
             method="greedy",
@@ -181,13 +181,16 @@ class BCDTo7SegmentSolver:
                         f"No implicant covers {segment}:{minterm}"
                     )
 
-        # Soft constraints: penalize each implicant by its AND gate cost
-        # Single-literal terms (direct wires) have 0 AND cost
-        # Multi-literal terms cost their literal count (AND gate inputs)
+        # Soft constraints: penalize each implicant by its total gate input cost
+        # Cost = AND inputs + OR inputs
+        # - AND inputs: num_literals if >= 2, else 0 (single literals are wires)
+        # - OR inputs: one per output this implicant covers
         for i, impl in enumerate(self.prime_implicants):
             and_cost = impl.num_literals if impl.num_literals >= 2 else 0
-            if and_cost > 0:
-                wcnf.append([-impl_vars[i]], weight=and_cost)
+            or_cost = len(impl.covered_minterms)  # Number of outputs it feeds
+            total_cost = and_cost + or_cost
+            if total_cost > 0:
+                wcnf.append([-impl_vars[i]], weight=total_cost)
 
         # Solve
         with RC2(wcnf) as solver:
@@ -222,7 +225,7 @@ class BCDTo7SegmentSolver:
         cost_breakdown = self._compute_cost_breakdown(selected, implicants_by_output)
 
         return SynthesisResult(
-            cost=cost_breakdown.and_inputs,  # Primary cost = AND inputs only
+            cost=cost_breakdown.total,  # Total = AND inputs + OR inputs
             implicants_by_output=implicants_by_output,
             shared_implicants=shared,
             method="maxsat",
