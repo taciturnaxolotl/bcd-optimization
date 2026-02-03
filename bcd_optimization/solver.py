@@ -20,14 +20,30 @@ from .quine_mccluskey import (
 
 
 @dataclass
+class CostBreakdown:
+    """Detailed cost breakdown for a synthesis result."""
+
+    and_inputs: int      # Inputs to AND gates (multi-literal product terms only)
+    or_inputs: int       # Inputs to OR gates (one per term per output)
+    num_and_gates: int   # Number of AND gates (multi-literal terms)
+    num_or_gates: int    # Number of OR gates (one per output = 7)
+
+    @property
+    def total(self) -> int:
+        """Total gate inputs (AND + OR)."""
+        return self.and_inputs + self.or_inputs
+
+
+@dataclass
 class SynthesisResult:
     """Result of logic synthesis optimization."""
 
-    cost: int  # Total gate inputs
+    cost: int  # Total gate inputs (for backward compat, = cost_breakdown.and_inputs)
     implicants_by_output: dict[str, list[Implicant]]
     shared_implicants: list[tuple[Implicant, list[str]]]
     method: str
     expressions: dict[str, str] = field(default_factory=dict)
+    cost_breakdown: CostBreakdown = None
 
 
 class BCDTo7SegmentSolver:
@@ -44,6 +60,45 @@ class BCDTo7SegmentSolver:
         self.prime_implicants: list[Implicant] = []
         self.minterms = {s: set(SEGMENT_MINTERMS[s]) for s in SEGMENT_NAMES}
         self.dc_set = set(DONT_CARES)
+
+    def _compute_cost_breakdown(
+        self,
+        selected: list[Implicant],
+        implicants_by_output: dict[str, list[Implicant]]
+    ) -> CostBreakdown:
+        """
+        Compute detailed cost breakdown for a set of selected implicants.
+
+        Cost model (assuming input complements are free):
+        - AND gate inputs: Only for multi-literal terms (2+ literals)
+          Single literals (A, B', etc.) are direct wires, no AND needed
+        - OR gate inputs: One per term per output it feeds
+        - AND gates: One per multi-literal term (shared across outputs)
+        - OR gates: One per output (7 total)
+        """
+        and_inputs = 0
+        num_and_gates = 0
+
+        for impl in selected:
+            if impl.num_literals >= 2:
+                # Multi-literal term needs an AND gate
+                and_inputs += impl.num_literals
+                num_and_gates += 1
+            # Single-literal terms are just wires (no AND gate cost)
+
+        # OR inputs: count terms feeding each output
+        or_inputs = sum(
+            len(implicants_by_output[seg])
+            for seg in SEGMENT_NAMES
+            if seg in implicants_by_output
+        )
+
+        return CostBreakdown(
+            and_inputs=and_inputs,
+            or_inputs=or_inputs,
+            num_and_gates=num_and_gates,
+            num_or_gates=7,
+        )
 
     def greedy_baseline(self) -> SynthesisResult:
         """
@@ -73,12 +128,16 @@ class BCDTo7SegmentSolver:
             terms = [impl.to_expr_str() for impl in implicants_by_output[segment]]
             expressions[segment] = " + ".join(terms) if terms else "0"
 
+        # Compute detailed cost breakdown
+        cost_breakdown = self._compute_cost_breakdown(selected, implicants_by_output)
+
         return SynthesisResult(
-            cost=cost,
+            cost=cost_breakdown.and_inputs,  # Primary cost = AND inputs only
             implicants_by_output=implicants_by_output,
             shared_implicants=shared,
             method="greedy",
             expressions=expressions,
+            cost_breakdown=cost_breakdown,
         )
 
     def generate_prime_implicants(self) -> list[Implicant]:
@@ -122,9 +181,13 @@ class BCDTo7SegmentSolver:
                         f"No implicant covers {segment}:{minterm}"
                     )
 
-        # Soft constraints: penalize each implicant by its literal count
+        # Soft constraints: penalize each implicant by its AND gate cost
+        # Single-literal terms (direct wires) have 0 AND cost
+        # Multi-literal terms cost their literal count (AND gate inputs)
         for i, impl in enumerate(self.prime_implicants):
-            wcnf.append([-impl_vars[i]], weight=impl.num_literals)
+            and_cost = impl.num_literals if impl.num_literals >= 2 else 0
+            if and_cost > 0:
+                wcnf.append([-impl_vars[i]], weight=and_cost)
 
         # Solve
         with RC2(wcnf) as solver:
@@ -137,9 +200,6 @@ class BCDTo7SegmentSolver:
             for i, impl in enumerate(self.prime_implicants):
                 if impl_vars[i] in model:
                     selected.append(impl)
-
-        # Calculate actual cost
-        cost = sum(impl.num_literals for impl in selected)
 
         # Organize by output
         implicants_by_output = {s: [] for s in SEGMENT_NAMES}
@@ -158,12 +218,16 @@ class BCDTo7SegmentSolver:
             terms = [impl.to_expr_str() for impl in implicants_by_output[segment]]
             expressions[segment] = " + ".join(terms) if terms else "0"
 
+        # Compute detailed cost breakdown
+        cost_breakdown = self._compute_cost_breakdown(selected, implicants_by_output)
+
         return SynthesisResult(
-            cost=cost,
+            cost=cost_breakdown.and_inputs,  # Primary cost = AND inputs only
             implicants_by_output=implicants_by_output,
             shared_implicants=shared,
             method="maxsat",
             expressions=expressions,
+            cost_breakdown=cost_breakdown,
         )
 
     def exact_synthesis(self, max_gates: int = 15) -> SynthesisResult:
@@ -322,12 +386,22 @@ class BCDTo7SegmentSolver:
                     expressions[segment] = node_names[i]
                     break
 
+        # For exact synthesis, all gates are 2-input gates
+        # This is a different circuit topology than SOP
+        cost_breakdown = CostBreakdown(
+            and_inputs=num_gates * 2,  # All gates treated as "AND-like"
+            or_inputs=0,               # No separate OR level in multi-level
+            num_and_gates=num_gates,
+            num_or_gates=0,
+        )
+
         return SynthesisResult(
             cost=num_gates * 2,  # 2 inputs per 2-input gate
             implicants_by_output={},
             shared_implicants=[],
             method=f"exact_{num_gates}gates",
             expressions=expressions,
+            cost_breakdown=cost_breakdown,
         )
 
     def _decode_gate_function(self, func: int) -> str:
@@ -405,12 +479,21 @@ class BCDTo7SegmentSolver:
         print(f"\n{'=' * 60}")
         print(f"Synthesis Result: {result.method}")
         print(f"{'=' * 60}")
-        print(f"Total gate inputs: {result.cost}")
+
+        if result.cost_breakdown:
+            cb = result.cost_breakdown
+            print(f"Cost breakdown:")
+            print(f"  AND gate inputs: {cb.and_inputs} ({cb.num_and_gates} gates)")
+            print(f"  OR gate inputs:  {cb.or_inputs} (7 gates)")
+            print(f"  Total:           {cb.total} gate inputs")
+        else:
+            print(f"Total gate inputs: {result.cost}")
 
         if result.shared_implicants:
             print(f"\nShared terms ({len(result.shared_implicants)}):")
             for impl, outputs in result.shared_implicants:
-                print(f"  {impl.to_expr_str():12} -> {', '.join(outputs)}")
+                lit_info = f"({impl.num_literals} lit)" if impl.num_literals >= 2 else "(wire)"
+                print(f"  {impl.to_expr_str():12} {lit_info:8} -> {', '.join(outputs)}")
 
         print("\nExpressions:")
         for segment in SEGMENT_NAMES:

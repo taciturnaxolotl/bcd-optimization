@@ -285,30 +285,35 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
     lines.append('    }')
     lines.append("")
 
-    # AND gates for shared product terms
-    lines.append("    // Shared AND gates (product terms)")
-    lines.append('    subgraph cluster_and {')
-    lines.append('        label="Product Terms";')
-    lines.append('        style=dashed;')
-    lines.append('        color=gray;')
+    # AND gates for shared product terms (only multi-literal terms need AND gates)
+    # Single-literal terms are just wires from input to OR
+    multi_literal_shared = [(i, impl, outputs) for i, (impl, outputs) in enumerate(result.shared_implicants) if impl.num_literals >= 2]
+    single_literal_shared = [(i, impl, outputs) for i, (impl, outputs) in enumerate(result.shared_implicants) if impl.num_literals < 2]
 
-    for i, (impl, outputs) in enumerate(result.shared_implicants):
-        term_label = impl.to_expr_str()
-        lines.append(f'        and_{i} [shape=polygon, sides=4, style=filled, fillcolor=lightgreen, label="AND\\n{term_label}"];')
-    lines.append('    }')
-    lines.append("")
+    if multi_literal_shared:
+        lines.append("    // Shared AND gates (multi-literal product terms)")
+        lines.append('    subgraph cluster_and {')
+        lines.append('        label="Product Terms";')
+        lines.append('        style=dashed;')
+        lines.append('        color=gray;')
 
-    # Connect inputs to AND gates
-    lines.append("    // Input to AND connections")
-    for i, (impl, _) in enumerate(result.shared_implicants):
-        for j, var in enumerate(['A', 'B', 'C', 'D']):
-            bit = 1 << (3 - j)
-            if impl.mask & bit:
-                if (impl.value >> (3 - j)) & 1:
-                    lines.append(f'    {var} -> and_{i};')
-                else:
-                    lines.append(f'    n{var} -> and_{i};')
-    lines.append("")
+        for i, impl, outputs in multi_literal_shared:
+            term_label = impl.to_expr_str()
+            lines.append(f'        and_{i} [shape=polygon, sides=4, style=filled, fillcolor=lightgreen, label="AND\\n{term_label}"];')
+        lines.append('    }')
+        lines.append("")
+
+        # Connect inputs to AND gates
+        lines.append("    // Input to AND connections")
+        for i, impl, _ in multi_literal_shared:
+            for j, var in enumerate(['A', 'B', 'C', 'D']):
+                bit = 1 << (3 - j)
+                if impl.mask & bit:
+                    if (impl.value >> (3 - j)) & 1:
+                        lines.append(f'    {var} -> and_{i};')
+                    else:
+                        lines.append(f'    n{var} -> and_{i};')
+        lines.append("")
 
     # OR gates for outputs
     lines.append("    // Output OR gates")
@@ -321,12 +326,24 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
     lines.append('    }')
     lines.append("")
 
-    # Connect AND gates to OR gates
+    # Connect AND gates to OR gates (multi-literal shared terms)
     lines.append("    // AND to OR connections")
-    for i, (impl, outputs) in enumerate(result.shared_implicants):
+    for i, impl, outputs in multi_literal_shared:
         for segment in outputs:
             lines.append(f'    and_{i} -> or_{segment};')
     lines.append("")
+
+    # Connect single-literal shared terms directly from inputs to OR gates
+    if single_literal_shared:
+        lines.append("    // Single-literal terms (direct wires)")
+        for i, impl, outputs in single_literal_shared:
+            for j, var in enumerate(['A', 'B', 'C', 'D']):
+                bit = 1 << (3 - j)
+                if impl.mask & bit:
+                    src = var if (impl.value >> (3 - j)) & 1 else f"n{var}"
+                    for segment in outputs:
+                        lines.append(f'    {src} -> or_{segment};')
+        lines.append("")
 
     # Handle non-shared terms (direct connections or inline ANDs)
     lines.append("    // Non-shared terms")
