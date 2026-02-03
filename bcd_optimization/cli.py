@@ -5,7 +5,7 @@ import sys
 
 from .solver import BCDTo7SegmentSolver
 from .truth_tables import print_truth_table
-from .export import to_verilog, to_c_code, to_equations
+from .export import to_verilog, to_c_code, to_equations, to_dot
 
 
 def main():
@@ -20,6 +20,7 @@ Examples:
   bcd-optimize --truth-table      Show the BCD truth table
   bcd-optimize --format verilog   Output as Verilog module
   bcd-optimize --format c         Output as C function
+  bcd-optimize --format dot       Output as Graphviz DOT (render with: dot -Tpng)
         """,
     )
 
@@ -41,7 +42,7 @@ Examples:
     )
     parser.add_argument(
         "--format", "-f",
-        choices=["text", "verilog", "c", "equations"],
+        choices=["text", "verilog", "c", "equations", "dot"],
         default="text",
         help="Output format (default: text)",
     )
@@ -87,6 +88,8 @@ Examples:
             print(to_c_code(result))
         elif args.format == "equations":
             print(to_equations(result))
+        elif args.format == "dot":
+            print(to_dot(result))
         else:
             print()
             solver.print_result(result)
