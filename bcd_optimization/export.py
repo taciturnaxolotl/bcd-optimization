@@ -226,6 +226,9 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
     Render with: dot -Tpng circuit.dot -o circuit.png
     Or:          dot -Tsvg circuit.dot -o circuit.svg
 
+    Note: Inputs and their complements (A, A', B, B', C, C', D, D') are
+    shown as free inputs - no inverter gates are needed.
+
     Args:
         result: The synthesis result
         title: Title for the diagram
@@ -240,46 +243,46 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
     lines.append('    fontsize=16;')
     lines.append('    rankdir=LR;')
     lines.append('    splines=ortho;')
-    lines.append('    nodesep=0.4;')
+    lines.append('    nodesep=0.3;')
     lines.append('    ranksep=0.8;')
     lines.append("")
 
-    # Input nodes
-    lines.append("    // Inputs")
+    # Determine which inputs (true and complement) are actually used
+    used_inputs = set()  # Will contain 'A', 'nA', 'B', 'nB', etc.
+
+    for impl, _ in result.shared_implicants:
+        for i, var in enumerate(['A', 'B', 'C', 'D']):
+            bit = 1 << (3 - i)
+            if impl.mask & bit:
+                if (impl.value >> (3 - i)) & 1:
+                    used_inputs.add(var)
+                else:
+                    used_inputs.add(f"n{var}")
+
+    for segment in SEGMENT_NAMES:
+        if segment not in result.implicants_by_output:
+            continue
+        for impl in result.implicants_by_output[segment]:
+            for i, var in enumerate(['A', 'B', 'C', 'D']):
+                bit = 1 << (3 - i)
+                if impl.mask & bit:
+                    if (impl.value >> (3 - i)) & 1:
+                        used_inputs.add(var)
+                    else:
+                        used_inputs.add(f"n{var}")
+
+    # Input nodes (true and complement forms are free)
+    lines.append("    // Inputs (active high and low available for free)")
     lines.append('    subgraph cluster_inputs {')
     lines.append('        label="Inputs";')
     lines.append('        style=dashed;')
     lines.append('        color=gray;')
     for var in ['A', 'B', 'C', 'D']:
-        lines.append(f'        {var} [shape=circle, style=filled, fillcolor=lightblue, label="{var}"];')
+        if var in used_inputs:
+            lines.append(f'        {var} [shape=circle, style=filled, fillcolor=lightblue, label="{var}"];')
+        if f"n{var}" in used_inputs:
+            lines.append(f'        n{var} [shape=circle, style=filled, fillcolor=lightcyan, label="{var}\'"];')
     lines.append('    }')
-    lines.append("")
-
-    # Inverters for negated inputs
-    lines.append("    // Inverters")
-    used_negations = set()
-    for impl, _ in result.shared_implicants:
-        for i, var in enumerate(['A', 'B', 'C', 'D']):
-            bit = 1 << (3 - i)
-            if impl.mask & bit and not ((impl.value >> (3 - i)) & 1):
-                used_negations.add(var)
-
-    # Check non-shared implicants too
-    for segment in SEGMENT_NAMES:
-        if segment not in result.implicants_by_output:
-            continue
-        for impl in result.implicants_by_output[segment]:
-            is_shared = any(impl == si for si, _ in result.shared_implicants)
-            if is_shared:
-                continue
-            for i, var in enumerate(['A', 'B', 'C', 'D']):
-                bit = 1 << (3 - i)
-                if impl.mask & bit and not ((impl.value >> (3 - i)) & 1):
-                    used_negations.add(var)
-
-    for var in sorted(used_negations):
-        lines.append(f'    not_{var} [shape=invtriangle, style=filled, fillcolor=lightyellow, label="NOT", width=0.4, height=0.4];')
-        lines.append(f'    {var} -> not_{var};')
     lines.append("")
 
     # AND gates for shared product terms
@@ -291,7 +294,6 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
 
     for i, (impl, outputs) in enumerate(result.shared_implicants):
         term_label = impl.to_expr_str()
-        outputs_str = ",".join(outputs)
         lines.append(f'        and_{i} [shape=polygon, sides=4, style=filled, fillcolor=lightgreen, label="AND\\n{term_label}"];')
     lines.append('    }')
     lines.append("")
@@ -305,7 +307,7 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
                 if (impl.value >> (3 - j)) & 1:
                     lines.append(f'    {var} -> and_{i};')
                 else:
-                    lines.append(f'    not_{var} -> and_{i};')
+                    lines.append(f'    n{var} -> and_{i};')
     lines.append("")
 
     # OR gates for outputs
@@ -337,7 +339,7 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
             if is_shared:
                 continue
 
-            # Single literal - direct connection
+            # Single literal - direct connection from input
             if impl.num_literals == 1:
                 for j, var in enumerate(['A', 'B', 'C', 'D']):
                     bit = 1 << (3 - j)
@@ -345,7 +347,7 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
                         if (impl.value >> (3 - j)) & 1:
                             lines.append(f'    {var} -> or_{segment};')
                         else:
-                            lines.append(f'    not_{var} -> or_{segment};')
+                            lines.append(f'    n{var} -> or_{segment};')
             else:
                 # Multi-literal non-shared AND
                 term_label = impl.to_expr_str()
@@ -357,7 +359,7 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
                         if (impl.value >> (3 - j)) & 1:
                             lines.append(f'    {var} -> {and_name};')
                         else:
-                            lines.append(f'    not_{var} -> {and_name};')
+                            lines.append(f'    n{var} -> {and_name};')
                 lines.append(f'    {and_name} -> or_{segment};')
                 nonshared_idx += 1
     lines.append("")
