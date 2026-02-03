@@ -1,0 +1,25 @@
+[project]
+name = "bcd-optimization"
+version = "0.1.0"
+description = "Multi-output logic synthesis solver for BCD to 7-segment decoders"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Kieran Klukas", email = "kieran@dunkirk.sh" }
+]
+dependencies = [
+    "python-sat>=0.1.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+bcd-optimize = "bcd_optimization.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
