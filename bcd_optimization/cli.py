@@ -5,7 +5,10 @@ import sys
 
 from .solver import BCDTo7SegmentSolver
 from .truth_tables import print_truth_table
-from .export import to_verilog, to_c_code, to_equations, to_dot
+from .export import (
+    to_verilog, to_c_code, to_equations, to_dot,
+    to_verilog_exact, to_c_exact, to_dot_exact,
+)
 
 
 def main():
@@ -81,15 +84,17 @@ Examples:
         if quiet:
             sys.stdout = old_stdout
 
-        # Output in requested format
+        # Output in requested format (use exact synthesis exports if available)
+        is_exact = result.gates is not None and len(result.gates) > 0
+
         if args.format == "verilog":
-            print(to_verilog(result))
+            print(to_verilog_exact(result) if is_exact else to_verilog(result))
         elif args.format == "c":
-            print(to_c_code(result))
+            print(to_c_exact(result) if is_exact else to_c_code(result))
         elif args.format == "equations":
             print(to_equations(result))
         elif args.format == "dot":
-            print(to_dot(result))
+            print(to_dot_exact(result) if is_exact else to_dot(result))
         else:
             print()
             solver.print_result(result)

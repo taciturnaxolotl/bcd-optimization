@@ -35,6 +35,16 @@ class CostBreakdown:
 
 
 @dataclass
+class GateInfo:
+    """Information about a gate in exact synthesis."""
+    index: int           # Gate index (0-based, after inputs)
+    input1: int          # First input node index
+    input2: int          # Second input node index
+    func: int            # 4-bit function code
+    func_name: str       # Human-readable function name
+
+
+@dataclass
 class SynthesisResult:
     """Result of logic synthesis optimization."""
 
@@ -44,6 +54,9 @@ class SynthesisResult:
     method: str
     expressions: dict[str, str] = field(default_factory=dict)
     cost_breakdown: CostBreakdown = None
+    # For exact synthesis: gate-level circuit description
+    gates: list[GateInfo] = None
+    output_map: dict[str, int] = None  # segment -> node index
 
 
 class BCDTo7SegmentSolver:
@@ -233,15 +246,17 @@ class BCDTo7SegmentSolver:
             cost_breakdown=cost_breakdown,
         )
 
-    def exact_synthesis(self, max_gates: int = 15) -> SynthesisResult:
+    def exact_synthesis(self, max_gates: int = 15, min_gates: int = 1) -> SynthesisResult:
         """
         Phase 3: SAT-based exact synthesis for provably optimal circuits.
 
         Encodes the circuit synthesis problem as SAT and iteratively searches
         for the minimum number of gates.
         """
-        for num_gates in range(1, max_gates + 1):
-            print(f"    Trying {num_gates} gates...")
+        import sys
+        for num_gates in range(min_gates, max_gates + 1):
+            print(f"    Trying {num_gates} gates...", flush=True)
+            sys.stdout.flush()
             result = self._try_exact_synthesis(num_gates)
             if result is not None:
                 return result
@@ -364,7 +379,7 @@ class BCDTo7SegmentSolver:
             return var in model
 
         node_names = ['A', 'B', 'C', 'D'] + [f'g{i}' for i in range(num_gates)]
-        gate_exprs = {}
+        gates = []
 
         for i in range(n_inputs, n_nodes):
             for j in range(i):
@@ -377,57 +392,70 @@ class BCDTo7SegmentSolver:
                                 if is_true(f[i][p][q]):
                                     func |= (1 << (p * 2 + q))
 
-                        op = self._decode_gate_function(func)
-                        gate_exprs[i] = f"({node_names[j]} {op} {node_names[k]})"
-                        node_names[i] = gate_exprs[i]
+                        func_name = self._decode_gate_function(func)
+                        gates.append(GateInfo(
+                            index=i - n_inputs,
+                            input1=j,
+                            input2=k,
+                            func=func,
+                            func_name=func_name,
+                        ))
+
+                        # Build expression string
+                        expr = f"({node_names[j]} {func_name} {node_names[k]})"
+                        node_names[i] = expr
                         break
 
+        # Map outputs to nodes
+        output_map = {}
         expressions = {}
         for h, segment in enumerate(SEGMENT_NAMES):
             for i in range(n_nodes):
                 if is_true(g[h][i]):
+                    output_map[segment] = i
                     expressions[segment] = node_names[i]
                     break
 
         # For exact synthesis, all gates are 2-input gates
-        # This is a different circuit topology than SOP
         cost_breakdown = CostBreakdown(
-            and_inputs=num_gates * 2,  # All gates treated as "AND-like"
-            or_inputs=0,               # No separate OR level in multi-level
+            and_inputs=num_gates * 2,
+            or_inputs=0,
             num_and_gates=num_gates,
             num_or_gates=0,
         )
 
         return SynthesisResult(
-            cost=num_gates * 2,  # 2 inputs per 2-input gate
+            cost=num_gates * 2,
             implicants_by_output={},
             shared_implicants=[],
             method=f"exact_{num_gates}gates",
             expressions=expressions,
             cost_breakdown=cost_breakdown,
+            gates=gates,
+            output_map=output_map,
         )
 
     def _decode_gate_function(self, func: int) -> str:
         """Decode 4-bit function to gate type name."""
-        # func[pq] gives output for inputs (p, q)
+        # func encodes 2-input truth table: bit i = f(p,q) where i = p*2 + q
         # Bit 0: f(0,0), Bit 1: f(0,1), Bit 2: f(1,0), Bit 3: f(1,1)
         names = {
-            0b0000: "0",
-            0b0001: "AND",
-            0b0010: "A>B",      # A AND NOT B
-            0b0011: "A",
-            0b0100: "B>A",      # B AND NOT A
-            0b0101: "B",
-            0b0110: "XOR",
-            0b0111: "OR",
-            0b1000: "NOR",
-            0b1001: "XNOR",
-            0b1010: "!B",
-            0b1011: "A+!B",     # A OR NOT B
-            0b1100: "!A",
-            0b1101: "!A+B",     # NOT A OR B
-            0b1110: "NAND",
-            0b1111: "1",
+            0b0000: "0",        # constant 0
+            0b0001: "NOR",      # 1 only when both inputs 0
+            0b0010: "B>A",      # B AND NOT A (inhibit)
+            0b0011: "!A",       # NOT first input
+            0b0100: "A>B",      # A AND NOT B (inhibit)
+            0b0101: "!B",       # NOT second input
+            0b0110: "XOR",      # exclusive or
+            0b0111: "NAND",     # NOT (A AND B)
+            0b1000: "AND",      # A AND B
+            0b1001: "XNOR",     # NOT (A XOR B)
+            0b1010: "B",        # pass through second input
+            0b1011: "!A+B",     # NOT A OR B (implication)
+            0b1100: "A",        # pass through first input
+            0b1101: "A+!B",     # A OR NOT B (implication)
+            0b1110: "OR",       # A OR B
+            0b1111: "1",        # constant 1
         }
         return names.get(func, f"F{func:04b}")
 

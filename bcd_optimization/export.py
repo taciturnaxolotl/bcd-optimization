@@ -402,6 +402,267 @@ def to_dot(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> 
     return "\n".join(lines)
 
 
+def to_verilog_exact(result: SynthesisResult, module_name: str = "bcd_to_7seg") -> str:
+    """
+    Export exact synthesis result to Verilog.
+
+    Args:
+        result: The synthesis result with gates list populated
+        module_name: Name for the Verilog module
+
+    Returns:
+        Verilog source code as string
+    """
+    if not result.gates:
+        raise ValueError("No gates in result - use to_verilog for SOP results")
+
+    lines = []
+    lines.append(f"// BCD to 7-segment decoder (exact synthesis)")
+    lines.append(f"// {len(result.gates)} gates, {result.cost} total gate inputs")
+    lines.append(f"// Method: {result.method}")
+    lines.append("")
+    lines.append(f"module {module_name} (")
+    lines.append("    input  wire [3:0] bcd,  // BCD input (0-9 valid)")
+    lines.append("    output wire [6:0] seg   // 7-segment output (a=seg[6], g=seg[0])")
+    lines.append(");")
+    lines.append("")
+    lines.append("    // Input aliases")
+    lines.append("    wire A = bcd[3];")
+    lines.append("    wire B = bcd[2];")
+    lines.append("    wire C = bcd[1];")
+    lines.append("    wire D = bcd[0];")
+    lines.append("")
+
+    n_inputs = 4
+    node_names = ['A', 'B', 'C', 'D']
+
+    # Generate gate wires
+    lines.append("    // Internal gate outputs")
+    for gate in result.gates:
+        node_names.append(f"g{gate.index}")
+        in1 = node_names[gate.input1]
+        in2 = node_names[gate.input2]
+        expr = _gate_to_verilog_expr(gate.func, in1, in2)
+        lines.append(f"    wire g{gate.index} = {expr};")
+
+    lines.append("")
+    lines.append("    // Segment output assignments")
+
+    for i, segment in enumerate(SEGMENT_NAMES):
+        if segment in result.output_map:
+            node_idx = result.output_map[segment]
+            src = node_names[node_idx]
+            seg_idx = 6 - i  # a=seg[6], b=seg[5], ..., g=seg[0]
+            lines.append(f"    assign seg[{seg_idx}] = {src};  // {segment}")
+
+    lines.append("")
+    lines.append("endmodule")
+
+    return "\n".join(lines)
+
+
+def _gate_to_verilog_expr(func: int, in1: str, in2: str) -> str:
+    """Convert gate function code to Verilog expression."""
+    # func encodes 2-input truth table: bit i = f(p,q) where i = p*2 + q
+    # Bit 0: f(0,0), Bit 1: f(0,1), Bit 2: f(1,0), Bit 3: f(1,1)
+    expressions = {
+        0b0000: "1'b0",                       # constant 0
+        0b0001: f"~({in1} | {in2})",          # NOR
+        0b0010: f"(~{in1} & {in2})",          # B AND NOT A
+        0b0011: f"~{in1}",                    # NOT A
+        0b0100: f"({in1} & ~{in2})",          # A AND NOT B
+        0b0101: f"~{in2}",                    # NOT B
+        0b0110: f"({in1} ^ {in2})",           # XOR
+        0b0111: f"~({in1} & {in2})",          # NAND
+        0b1000: f"({in1} & {in2})",           # AND
+        0b1001: f"~({in1} ^ {in2})",          # XNOR
+        0b1010: in2,                          # B (pass through)
+        0b1011: f"(~{in1} | {in2})",          # NOT A OR B
+        0b1100: in1,                          # A (pass through)
+        0b1101: f"({in1} | ~{in2})",          # A OR NOT B
+        0b1110: f"({in1} | {in2})",           # OR
+        0b1111: "1'b1",                       # constant 1
+    }
+    return expressions.get(func, f"/* unknown func {func} */")
+
+
+def to_dot_exact(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> str:
+    """
+    Export exact synthesis result as Graphviz DOT format.
+
+    Args:
+        result: The synthesis result with gates list populated
+        title: Title for the diagram
+
+    Returns:
+        DOT source code as string
+    """
+    if not result.gates:
+        raise ValueError("No gates in result - use to_dot for SOP results")
+
+    lines = []
+    lines.append("digraph BCD_7Seg {")
+    lines.append(f'    label="{title}\\n{len(result.gates)} gates, {result.cost} gate inputs";')
+    lines.append('    labelloc="t";')
+    lines.append('    fontsize=16;')
+    lines.append('    rankdir=LR;')
+    lines.append('    splines=ortho;')
+    lines.append('    nodesep=0.5;')
+    lines.append('    ranksep=1.0;')
+    lines.append("")
+
+    n_inputs = 4
+    node_names = ['A', 'B', 'C', 'D']
+
+    # Input nodes
+    lines.append('    // Inputs')
+    lines.append('    subgraph cluster_inputs {')
+    lines.append('        label="Inputs";')
+    lines.append('        style=dashed;')
+    lines.append('        color=gray;')
+    for name in node_names:
+        lines.append(f'        {name} [shape=circle, style=filled, fillcolor=lightblue, label="{name}"];')
+    lines.append('    }')
+    lines.append("")
+
+    # Gate nodes
+    lines.append('    // Gates')
+    lines.append('    subgraph cluster_gates {')
+    lines.append('        label="Logic Gates";')
+    lines.append('        style=dashed;')
+    lines.append('        color=gray;')
+
+    gate_colors = {
+        'AND': 'lightgreen',
+        'OR': 'lightsalmon',
+        'XOR': 'lightyellow',
+        'XNOR': 'lightyellow',
+        'NAND': 'palegreen',
+        'NOR': 'peachpuff',
+    }
+
+    for gate in result.gates:
+        node_names.append(f"g{gate.index}")
+        color = gate_colors.get(gate.func_name, 'lightgray')
+        lines.append(f'        g{gate.index} [shape=box, style=filled, fillcolor={color}, label="{gate.func_name}"];')
+    lines.append('    }')
+    lines.append("")
+
+    # Gate connections
+    lines.append('    // Gate input connections')
+    node_names_lookup = ['A', 'B', 'C', 'D'] + [f"g{g.index}" for g in result.gates]
+    for gate in result.gates:
+        in1 = node_names_lookup[gate.input1]
+        in2 = node_names_lookup[gate.input2]
+        lines.append(f'    {in1} -> g{gate.index};')
+        lines.append(f'    {in2} -> g{gate.index};')
+    lines.append("")
+
+    # Output nodes
+    lines.append('    // Outputs')
+    lines.append('    subgraph cluster_outputs {')
+    lines.append('        label="Segment Outputs";')
+    lines.append('        style=dashed;')
+    lines.append('        color=gray;')
+    for segment in SEGMENT_NAMES:
+        lines.append(f'        out_{segment} [shape=doublecircle, style=filled, fillcolor=lightpink, label="{segment}"];')
+    lines.append('    }')
+    lines.append("")
+
+    # Output connections
+    lines.append('    // Output connections')
+    for segment in SEGMENT_NAMES:
+        if segment in result.output_map:
+            node_idx = result.output_map[segment]
+            src = node_names_lookup[node_idx]
+            lines.append(f'    {src} -> out_{segment};')
+
+    lines.append("}")
+
+    return "\n".join(lines)
+
+
+def to_c_exact(result: SynthesisResult, func_name: str = "bcd_to_7seg") -> str:
+    """
+    Export exact synthesis result as C code.
+
+    Args:
+        result: The synthesis result with gates list populated
+        func_name: Name for the C function
+
+    Returns:
+        C source code as string
+    """
+    if not result.gates:
+        raise ValueError("No gates in result - use to_c_code for SOP results")
+
+    lines = []
+    lines.append("/*")
+    lines.append(" * BCD to 7-segment decoder (exact synthesis)")
+    lines.append(f" * {len(result.gates)} gates, {result.cost} total gate inputs")
+    lines.append(f" * Method: {result.method}")
+    lines.append(" */")
+    lines.append("")
+    lines.append("#include <stdint.h>")
+    lines.append("")
+    lines.append(f"uint8_t {func_name}(uint8_t bcd) {{")
+    lines.append("    // Extract individual bits")
+    lines.append("    uint8_t A = (bcd >> 3) & 1;")
+    lines.append("    uint8_t B = (bcd >> 2) & 1;")
+    lines.append("    uint8_t C = (bcd >> 1) & 1;")
+    lines.append("    uint8_t D = bcd & 1;")
+    lines.append("")
+
+    node_names = ['A', 'B', 'C', 'D']
+
+    lines.append("    // Gate outputs")
+    for gate in result.gates:
+        node_names.append(f"g{gate.index}")
+        in1 = node_names[gate.input1]
+        in2 = node_names[gate.input2]
+        expr = _gate_to_c_expr(gate.func, in1, in2)
+        lines.append(f"    uint8_t g{gate.index} = {expr};")
+
+    lines.append("")
+    lines.append("    // Pack segment outputs (bit 6 = a, bit 0 = g)")
+
+    pack_parts = []
+    for i, segment in enumerate(SEGMENT_NAMES):
+        if segment in result.output_map:
+            node_idx = result.output_map[segment]
+            src = node_names[node_idx]
+            pack_parts.append(f"({src} << {6-i})")
+
+    lines.append(f"    return {' | '.join(pack_parts)};")
+    lines.append("}")
+
+    return "\n".join(lines)
+
+
+def _gate_to_c_expr(func: int, in1: str, in2: str) -> str:
+    """Convert gate function code to C expression."""
+    # func encodes 2-input truth table: bit i = f(p,q) where i = p*2 + q
+    expressions = {
+        0b0000: "0",                          # constant 0
+        0b0001: f"!({in1} | {in2})",          # NOR
+        0b0010: f"(!{in1} & {in2})",          # B AND NOT A
+        0b0011: f"!{in1}",                    # NOT A
+        0b0100: f"({in1} & !{in2})",          # A AND NOT B
+        0b0101: f"!{in2}",                    # NOT B
+        0b0110: f"({in1} ^ {in2})",           # XOR
+        0b0111: f"!({in1} & {in2})",          # NAND
+        0b1000: f"({in1} & {in2})",           # AND
+        0b1001: f"!({in1} ^ {in2})",          # XNOR
+        0b1010: in2,                          # B (pass through)
+        0b1011: f"(!{in1} | {in2})",          # NOT A OR B
+        0b1100: in1,                          # A (pass through)
+        0b1101: f"({in1} | !{in2})",          # A OR NOT B
+        0b1110: f"({in1} | {in2})",           # OR
+        0b1111: "1",                          # constant 1
+    }
+    return expressions.get(func, f"/* unknown func {func} */")
+
+
 if __name__ == "__main__":
     from .solver import BCDTo7SegmentSolver
 
