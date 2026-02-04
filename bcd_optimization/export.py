@@ -486,6 +486,33 @@ def _gate_to_verilog_expr(func: int, in1: str, in2: str) -> str:
     return expressions.get(func, f"/* unknown func {func} */")
 
 
+def _decompose_gate_function(func: int) -> tuple[str, bool, bool]:
+    """
+    Decompose a 4-bit gate function into base gate type and input inversions.
+
+    Returns: (gate_type, input1_inverted, input2_inverted)
+    """
+    decomposition = {
+        0b0000: ("CONST0", False, False),
+        0b0001: ("NOR", False, False),
+        0b0010: ("AND", True, False),   # !A & B
+        0b0011: ("BUF", True, False),   # !A (ignore B)
+        0b0100: ("AND", False, True),   # A & !B
+        0b0101: ("BUF", False, True),   # !B (ignore A)
+        0b0110: ("XOR", False, False),
+        0b0111: ("NAND", False, False),
+        0b1000: ("AND", False, False),
+        0b1001: ("XNOR", False, False),
+        0b1010: ("BUF", False, False),  # B (ignore A)
+        0b1011: ("OR", True, False),    # !A | B
+        0b1100: ("BUF", False, False),  # A (ignore B)
+        0b1101: ("OR", False, True),    # A | !B
+        0b1110: ("OR", False, False),
+        0b1111: ("CONST1", False, False),
+    }
+    return decomposition.get(func, ("???", False, False))
+
+
 def to_dot_exact(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder") -> str:
     """
     Export exact synthesis result as Graphviz DOT format.
@@ -525,7 +552,7 @@ def to_dot_exact(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder
     lines.append('    }')
     lines.append("")
 
-    # Gate nodes
+    # Gate nodes - color by base gate type
     lines.append('    // Gates')
     lines.append('    subgraph cluster_gates {')
     lines.append('        label="Logic Gates";')
@@ -536,26 +563,39 @@ def to_dot_exact(result: SynthesisResult, title: str = "BCD to 7-Segment Decoder
         'AND': 'lightgreen',
         'OR': 'lightsalmon',
         'XOR': 'lightyellow',
-        'XNOR': 'lightyellow',
+        'XNOR': 'khaki',
         'NAND': 'palegreen',
         'NOR': 'peachpuff',
+        'BUF': 'lightgray',
+        'CONST0': 'white',
+        'CONST1': 'white',
     }
 
+    # Pre-compute gate decompositions
+    gate_decomp = {}
     for gate in result.gates:
+        base_type, inv1, inv2 = _decompose_gate_function(gate.func)
+        gate_decomp[gate.index] = (base_type, inv1, inv2)
         node_names.append(f"g{gate.index}")
-        color = gate_colors.get(gate.func_name, 'lightgray')
-        lines.append(f'        g{gate.index} [shape=box, style=filled, fillcolor={color}, label="{gate.func_name}"];')
+        color = gate_colors.get(base_type, 'lightgray')
+        lines.append(f'        g{gate.index} [shape=box, style=filled, fillcolor={color}, label="{base_type}"];')
     lines.append('    }')
     lines.append("")
 
-    # Gate connections
+    # Gate connections with inversion markers on edges
     lines.append('    // Gate input connections')
     node_names_lookup = ['A', 'B', 'C', 'D'] + [f"g{g.index}" for g in result.gates]
     for gate in result.gates:
+        base_type, inv1, inv2 = gate_decomp[gate.index]
         in1 = node_names_lookup[gate.input1]
         in2 = node_names_lookup[gate.input2]
-        lines.append(f'    {in1} -> g{gate.index};')
-        lines.append(f'    {in2} -> g{gate.index};')
+
+        # Add inversion indicator as edge label
+        label1 = " [taillabel=\"'\", labeldistance=2]" if inv1 else ""
+        label2 = " [taillabel=\"'\", labeldistance=2]" if inv2 else ""
+
+        lines.append(f'    {in1} -> g{gate.index}{label1};')
+        lines.append(f'    {in2} -> g{gate.index}{label2};')
     lines.append("")
 
     # Output nodes

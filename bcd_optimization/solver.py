@@ -246,24 +246,347 @@ class BCDTo7SegmentSolver:
             cost_breakdown=cost_breakdown,
         )
 
-    def exact_synthesis(self, max_gates: int = 15, min_gates: int = 1) -> SynthesisResult:
+    def exact_synthesis(self, max_gates: int = 15, min_gates: int = 1, use_complements: bool = False) -> SynthesisResult:
         """
         Phase 3: SAT-based exact synthesis for provably optimal circuits.
 
         Encodes the circuit synthesis problem as SAT and iteratively searches
         for the minimum number of gates.
+
+        Args:
+            max_gates: Maximum number of gates to try
+            min_gates: Minimum number of gates to start from
+            use_complements: If True, include A',B',C',D' as free inputs
         """
         import sys
+        complement_str = " (with complements)" if use_complements else ""
         for num_gates in range(min_gates, max_gates + 1):
-            print(f"    Trying {num_gates} gates...", flush=True)
+            print(f"    Trying {num_gates} gates{complement_str}...", flush=True)
             sys.stdout.flush()
-            result = self._try_exact_synthesis(num_gates)
+            result = self._try_exact_synthesis(num_gates, use_complements)
             if result is not None:
                 return result
 
         raise RuntimeError(f"No solution found with up to {max_gates} gates")
 
-    def _try_exact_synthesis(self, num_gates: int) -> Optional[SynthesisResult]:
+    def exact_synthesis_mixed(self, max_inputs: int = 24, use_complements: bool = True) -> SynthesisResult:
+        """
+        SAT-based exact synthesis with mixed 2-input and 3-input gates.
+
+        Searches for circuits with total gate inputs <= max_inputs.
+        """
+        import sys
+
+        # Try different combinations of 2-input and 3-input gates
+        # Cost = 2*n2 + 3*n3, want to minimize while finding valid circuit
+        best_result = None
+
+        for total_cost in range(14, max_inputs + 1):  # Start from reasonable minimum
+            print(f"  Trying circuits with {total_cost} total inputs...", flush=True)
+
+            # Try all valid (n2, n3) combinations for this cost
+            for n3 in range(total_cost // 3 + 1):
+                remaining = total_cost - 3 * n3
+                if remaining >= 0 and remaining % 2 == 0:
+                    n2 = remaining // 2
+                    if n2 + n3 >= 7:  # Need at least 7 gates for 7 outputs
+                        result = self._try_mixed_synthesis(n2, n3, use_complements)
+                        if result is not None:
+                            return result
+
+        raise RuntimeError(f"No solution found with up to {max_inputs} gate inputs")
+
+    def _try_mixed_synthesis(self, num_2input: int, num_3input: int, use_complements: bool = True, restrict_functions: bool = True) -> Optional[SynthesisResult]:
+        """Try synthesis with a specific mix of 2-input and 3-input gates."""
+        n_primary = 4
+        n_inputs = 8 if use_complements else 4
+        n_outputs = 7
+        n_gates = num_2input + num_3input
+        n_nodes = n_inputs + n_gates
+
+        truth_rows = list(range(10))
+        n_rows = len(truth_rows)
+
+        cnf = CNF()
+        var_counter = [1]
+
+        def new_var():
+            v = var_counter[0]
+            var_counter[0] += 1
+            return v
+
+        # x[i][t] = output of node i on row t
+        x = {i: {t: new_var() for t in range(n_rows)} for i in range(n_nodes)}
+
+        # For 2-input gates: s2[i][j][k] = gate i uses inputs j, k
+        # For 3-input gates: s3[i][j][k][l] = gate i uses inputs j, k, l
+        s2 = {}
+        s3 = {}
+        f2 = {}  # 4-bit function for 2-input gates
+        f3 = {}  # 8-bit function for 3-input gates
+
+        # Gate type: is_3input[i] = True if gate i is 3-input
+        is_3input = {}
+
+        # First num_2input gates are 2-input, rest are 3-input
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            if gate_idx < num_2input:
+                # 2-input gate
+                s2[i] = {}
+                for j in range(i):
+                    s2[i][j] = {k: new_var() for k in range(j + 1, i)}
+                f2[i] = {p: {q: new_var() for q in range(2)} for p in range(2)}
+            else:
+                # 3-input gate
+                s3[i] = {}
+                for j in range(i):
+                    s3[i][j] = {}
+                    for k in range(j + 1, i):
+                        s3[i][j][k] = {l: new_var() for l in range(k + 1, i)}
+                # 8-bit function table for 3 inputs
+                f3[i] = {p: {q: {r: new_var() for r in range(2)} for q in range(2)} for p in range(2)}
+
+        # g[h][i] = output h comes from node i
+        g = {h: {i: new_var() for i in range(n_nodes)} for h in range(n_outputs)}
+
+        # Constraint 1: Primary inputs fixed by truth table
+        for t_idx, t in enumerate(truth_rows):
+            for i in range(n_primary):
+                bit = (t >> (n_primary - 1 - i)) & 1
+                cnf.append([x[i][t_idx] if bit else -x[i][t_idx]])
+            if use_complements:
+                for i in range(n_primary):
+                    bit = (t >> (n_primary - 1 - i)) & 1
+                    cnf.append([x[n_primary + i][t_idx] if not bit else -x[n_primary + i][t_idx]])
+
+        # Constraint 2: Each gate has exactly one input selection
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            if gate_idx < num_2input:
+                all_sels = [s2[i][j][k] for j in range(i) for k in range(j + 1, i)]
+            else:
+                all_sels = [s3[i][j][k][l] for j in range(i) for k in range(j + 1, i) for l in range(k + 1, i)]
+
+            cnf.append(all_sels)  # At least one
+            for idx1, sel1 in enumerate(all_sels):
+                for sel2 in all_sels[idx1 + 1:]:
+                    cnf.append([-sel1, -sel2])  # At most one
+
+        # Constraint 3: Gate function consistency
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            if gate_idx < num_2input:
+                # 2-input gate
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for t_idx in range(n_rows):
+                            for pv in range(2):
+                                for qv in range(2):
+                                    for outv in range(2):
+                                        clause = [-s2[i][j][k]]
+                                        clause.append(-x[j][t_idx] if pv else x[j][t_idx])
+                                        clause.append(-x[k][t_idx] if qv else x[k][t_idx])
+                                        clause.append(-f2[i][pv][qv] if outv else f2[i][pv][qv])
+                                        clause.append(x[i][t_idx] if outv else -x[i][t_idx])
+                                        cnf.append(clause)
+            else:
+                # 3-input gate
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            for t_idx in range(n_rows):
+                                for pv in range(2):
+                                    for qv in range(2):
+                                        for rv in range(2):
+                                            for outv in range(2):
+                                                clause = [-s3[i][j][k][l]]
+                                                clause.append(-x[j][t_idx] if pv else x[j][t_idx])
+                                                clause.append(-x[k][t_idx] if qv else x[k][t_idx])
+                                                clause.append(-x[l][t_idx] if rv else x[l][t_idx])
+                                                clause.append(-f3[i][pv][qv][rv] if outv else f3[i][pv][qv][rv])
+                                                clause.append(x[i][t_idx] if outv else -x[i][t_idx])
+                                                cnf.append(clause)
+
+        # Constraint 3b: Restrict to standard gate functions
+        if restrict_functions:
+            # 2-input: AND, OR, XOR, NAND, NOR (no XNOR - use XOR+INV if needed)
+            allowed_2input = [0b1000, 0b1110, 0b0110, 0b0111, 0b0001]
+            for gate_idx in range(num_2input):
+                i = n_inputs + gate_idx
+                or_clause = []
+                for func in allowed_2input:
+                    match_var = new_var()
+                    or_clause.append(match_var)
+                    for p in range(2):
+                        for q in range(2):
+                            bit_idx = p * 2 + q
+                            expected = (func >> bit_idx) & 1
+                            if expected:
+                                cnf.append([-match_var, f2[i][p][q]])
+                            else:
+                                cnf.append([-match_var, -f2[i][p][q]])
+                cnf.append(or_clause)
+
+            # 3-input: AND3, OR3, XOR3, NAND3, NOR3 (user's available gates)
+            allowed_3input = [
+                0b10000000,  # AND3
+                0b11111110,  # OR3
+                0b01111111,  # NAND3
+                0b00000001,  # NOR3
+                0b10010110,  # XOR3 (odd parity)
+            ]
+            for gate_idx in range(num_2input, num_2input + num_3input):
+                i = n_inputs + gate_idx
+                or_clause = []
+                for func in allowed_3input:
+                    match_var = new_var()
+                    or_clause.append(match_var)
+                    for p in range(2):
+                        for q in range(2):
+                            for r in range(2):
+                                bit_idx = p * 4 + q * 2 + r
+                                expected = (func >> bit_idx) & 1
+                                if expected:
+                                    cnf.append([-match_var, f3[i][p][q][r]])
+                                else:
+                                    cnf.append([-match_var, -f3[i][p][q][r]])
+                cnf.append(or_clause)
+
+        # Constraint 4: Each output assigned to exactly one node
+        for h in range(n_outputs):
+            cnf.append([g[h][i] for i in range(n_nodes)])
+            for i in range(n_nodes):
+                for j in range(i + 1, n_nodes):
+                    cnf.append([-g[h][i], -g[h][j]])
+
+        # Constraint 5: Output correctness
+        for h, segment in enumerate(SEGMENT_NAMES):
+            for t_idx, t in enumerate(truth_rows):
+                expected = 1 if t in SEGMENT_MINTERMS[segment] else 0
+                for i in range(n_nodes):
+                    if expected:
+                        cnf.append([-g[h][i], x[i][t_idx]])
+                    else:
+                        cnf.append([-g[h][i], -x[i][t_idx]])
+
+        # Solve
+        with Solver(bootstrap_with=cnf) as solver:
+            if solver.solve():
+                model = set(solver.get_model())
+                return self._decode_mixed_solution(
+                    model, num_2input, num_3input, n_inputs, n_nodes,
+                    x, s2, s3, f2, f3, g, use_complements
+                )
+            return None
+
+    def _decode_mixed_solution(self, model, num_2input, num_3input, n_inputs, n_nodes,
+                                x, s2, s3, f2, f3, g, use_complements) -> SynthesisResult:
+        """Decode SAT solution for mixed gate sizes."""
+        def is_true(var):
+            return var in model
+
+        if use_complements:
+            node_names = ['A', 'B', 'C', 'D', "A'", "B'", "C'", "D'"] + [f'g{i}' for i in range(num_2input + num_3input)]
+        else:
+            node_names = ['A', 'B', 'C', 'D'] + [f'g{i}' for i in range(num_2input + num_3input)]
+
+        gates = []
+        n_gates = num_2input + num_3input
+
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            if gate_idx < num_2input:
+                # 2-input gate
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        if is_true(s2[i][j][k]):
+                            func = 0
+                            for p in range(2):
+                                for q in range(2):
+                                    if is_true(f2[i][p][q]):
+                                        func |= (1 << (p * 2 + q))
+                            func_name = self._decode_gate_function(func)
+                            gates.append(GateInfo(
+                                index=gate_idx,
+                                input1=j,
+                                input2=k,
+                                func=func,
+                                func_name=func_name,
+                            ))
+                            expr = f"({node_names[j]} {func_name} {node_names[k]})"
+                            node_names[i] = expr
+                            break
+            else:
+                # 3-input gate
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            if is_true(s3[i][j][k][l]):
+                                func = 0
+                                for p in range(2):
+                                    for q in range(2):
+                                        for r in range(2):
+                                            if is_true(f3[i][p][q][r]):
+                                                func |= (1 << (p * 4 + q * 2 + r))
+                                func_name = self._decode_3input_function(func)
+                                # Store as GateInfo with input2 being a tuple indicator
+                                gates.append(GateInfo(
+                                    index=gate_idx,
+                                    input1=j,
+                                    input2=(k, l),  # Pack two inputs
+                                    func=func,
+                                    func_name=func_name,
+                                ))
+                                expr = f"({node_names[j]} {func_name} {node_names[k]} {node_names[l]})"
+                                node_names[i] = expr
+                                break
+
+        # Map outputs
+        output_map = {}
+        expressions = {}
+        for h, segment in enumerate(SEGMENT_NAMES):
+            for i in range(n_nodes):
+                if is_true(g[h][i]):
+                    output_map[segment] = i
+                    expressions[segment] = node_names[i]
+                    break
+
+        total_cost = 2 * num_2input + 3 * num_3input
+        cost_breakdown = CostBreakdown(
+            and_inputs=total_cost,
+            or_inputs=0,
+            num_and_gates=num_2input + num_3input,
+            num_or_gates=0,
+        )
+
+        return SynthesisResult(
+            cost=total_cost,
+            implicants_by_output={},
+            shared_implicants=[],
+            method=f"exact_mixed_{num_2input}x2_{num_3input}x3",
+            expressions=expressions,
+            cost_breakdown=cost_breakdown,
+            gates=gates,
+            output_map=output_map,
+        )
+
+    def _decode_3input_function(self, func: int) -> str:
+        """Decode 8-bit function for 3-input gate."""
+        # Common 3-input functions
+        known = {
+            0b00000001: "NOR3",
+            0b01111111: "NAND3",
+            0b10000000: "AND3",
+            0b11111110: "OR3",
+            0b10010110: "XOR3",  # Odd parity
+            0b01101001: "XNOR3", # Even parity
+            0b11101000: "MAJ",   # Majority
+            0b00010111: "MIN",   # Minority
+        }
+        return known.get(func, f"F3_{func:08b}")
+
+    def _try_exact_synthesis(self, num_gates: int, use_complements: bool = False, restrict_functions: bool = False) -> Optional[SynthesisResult]:
         """
         Try to find a circuit with exactly num_gates gates.
 
@@ -271,8 +594,14 @@ class BCDTo7SegmentSolver:
         - Variables encode gate structure (which inputs each gate uses)
         - Variables encode gate function (AND, OR, NAND, NOR, etc.)
         - Constraints ensure functional correctness on all valid inputs
+
+        Args:
+            num_gates: Number of 2-input gates to use
+            use_complements: If True, include A',B',C',D' as free inputs (8 total)
+            restrict_functions: If True, only allow AND, OR, XOR, NAND, NOR, XNOR
         """
-        n_inputs = 4  # A, B, C, D
+        n_primary = 4  # A, B, C, D
+        n_inputs = 8 if use_complements else 4  # Include complements if requested
         n_outputs = 7  # a, b, c, d, e, f, g
         n_nodes = n_inputs + num_gates
 
@@ -313,9 +642,16 @@ class BCDTo7SegmentSolver:
 
         # Constraint 1: Primary inputs are fixed by truth table
         for t_idx, t in enumerate(truth_rows):
-            for i in range(n_inputs):
-                bit = (t >> (n_inputs - 1 - i)) & 1
+            # First 4 inputs: A, B, C, D
+            for i in range(n_primary):
+                bit = (t >> (n_primary - 1 - i)) & 1
                 cnf.append([x[i][t_idx] if bit else -x[i][t_idx]])
+            # Next 4 inputs (if using complements): A', B', C', D'
+            if use_complements:
+                for i in range(n_primary):
+                    bit = (t >> (n_primary - 1 - i)) & 1
+                    # Complement is the inverse
+                    cnf.append([x[n_primary + i][t_idx] if not bit else -x[n_primary + i][t_idx]])
 
         # Constraint 2: Each gate has exactly one input pair
         for i in range(n_inputs, n_nodes):
@@ -344,6 +680,31 @@ class BCDTo7SegmentSolver:
                                     clause.append(x[i][t_idx] if outv else -x[i][t_idx])
                                     cnf.append(clause)
 
+        # Constraint 3b: Restrict to standard gate functions (if requested)
+        # With complements available, we only need symmetric functions
+        if restrict_functions:
+            # Allowed: AND(1000), OR(1110), XOR(0110), NAND(0111), NOR(0001), XNOR(1001)
+            allowed_funcs = [0b1000, 0b1110, 0b0110, 0b0111, 0b0001, 0b1001]
+            for i in range(n_inputs, n_nodes):
+                # For each gate, the function must be one of the allowed ones
+                # Encode as: (func == AND) OR (func == OR) OR ...
+                or_clause = []
+                for func in allowed_funcs:
+                    # Create aux var for "this gate has this function"
+                    match_var = new_var()
+                    or_clause.append(match_var)
+                    # match_var -> all f bits match the function
+                    for p in range(2):
+                        for q in range(2):
+                            bit_idx = p * 2 + q
+                            expected = (func >> bit_idx) & 1
+                            if expected:
+                                cnf.append([-match_var, f[i][p][q]])
+                            else:
+                                cnf.append([-match_var, -f[i][p][q]])
+                # At least one match_var must be true
+                cnf.append(or_clause)
+
         # Constraint 4: Each output assigned to exactly one node
         for h in range(n_outputs):
             cnf.append([g[h][i] for i in range(n_nodes)])
@@ -366,19 +727,22 @@ class BCDTo7SegmentSolver:
             if solver.solve():
                 model = set(solver.get_model())
                 return self._decode_exact_solution(
-                    model, num_gates, n_inputs, n_nodes, x, s, f, g
+                    model, num_gates, n_inputs, n_nodes, x, s, f, g, use_complements
                 )
             return None
 
     def _decode_exact_solution(
-        self, model, num_gates, n_inputs, n_nodes, x, s, f, g
+        self, model, num_gates, n_inputs, n_nodes, x, s, f, g, use_complements: bool = False
     ) -> SynthesisResult:
         """Decode SAT solution into readable circuit description."""
 
         def is_true(var):
             return var in model
 
-        node_names = ['A', 'B', 'C', 'D'] + [f'g{i}' for i in range(num_gates)]
+        if use_complements:
+            node_names = ['A', 'B', 'C', 'D', "A'", "B'", "C'", "D'"] + [f'g{i}' for i in range(num_gates)]
+        else:
+            node_names = ['A', 'B', 'C', 'D'] + [f'g{i}' for i in range(num_gates)]
         gates = []
 
         for i in range(n_inputs, n_nodes):
