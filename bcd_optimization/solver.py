@@ -686,6 +686,48 @@ class BCDTo7SegmentSolver:
                 for sel2 in all_sels[idx1 + 1:]:
                     clauses.append([-sel1, -sel2])
 
+        # Constraint 2b: Symmetry breaking - gates of same type ordered by first input
+        # For consecutive gates of the same size, require first input index is non-decreasing
+        for gate_idx in range(n_gates - 1):
+            i = n_inputs + gate_idx
+            i_next = n_inputs + gate_idx + 1
+            size = gate_sizes[gate_idx]
+            size_next = gate_sizes[gate_idx + 1]
+
+            if size != size_next:
+                continue  # Only break symmetry between same-type gates
+
+            if size == 2:
+                # For 2-input gates: if gate i has first input j and gate i+1 has first input j',
+                # require j <= j'
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for j_next in range(j):  # j_next < j violates ordering
+                            for k_next in range(j_next + 1, i_next):
+                                if j_next in s2[i_next] and k_next in s2[i_next][j_next]:
+                                    clauses.append([-s2[i][j][k], -s2[i_next][j_next][k_next]])
+            elif size == 3:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            for j_next in range(j):
+                                for k_next in range(j_next + 1, i_next):
+                                    for l_next in range(k_next + 1, i_next):
+                                        if j_next in s3[i_next] and k_next in s3[i_next][j_next] and l_next in s3[i_next][j_next][k_next]:
+                                            clauses.append([-s3[i][j][k][l], -s3[i_next][j_next][k_next][l_next]])
+            else:  # size == 4
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            for m in range(l + 1, i):
+                                for j_next in range(j):
+                                    for k_next in range(j_next + 1, i_next):
+                                        for l_next in range(k_next + 1, i_next):
+                                            for m_next in range(l_next + 1, i_next):
+                                                if (j_next in s4[i_next] and k_next in s4[i_next][j_next] and
+                                                    l_next in s4[i_next][j_next][k_next] and m_next in s4[i_next][j_next][k_next][l_next]):
+                                                    clauses.append([-s4[i][j][k][l][m], -s4[i_next][j_next][k_next][l_next][m_next]])
+
         # Constraint 3: Gate function consistency
         for gate_idx in range(n_gates):
             i = n_inputs + gate_idx

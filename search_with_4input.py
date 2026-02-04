@@ -237,7 +237,7 @@ def progress_bar(current, total, width=30, label=""):
     return f"{label}[{bar}] {current}/{total} ({pct:.0f}%)"
 
 
-def try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats_queue):
+def try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats_queue, stop_event=None):
     """Try a single (n2, n3, n4) configuration with stats reporting."""
     cost = n2 * 2 + n3 * 3 + n4 * 4
     n_gates = n2 + n3 + n4
@@ -254,6 +254,10 @@ def try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats
 
     start = time.time()
     try:
+        # Check early termination before building CNF
+        if stop_event and stop_event.is_set():
+            return None, cost, "Cancelled", (n2, n3, n4)
+
         # Build the CNF without solving
         cnf = solver._build_general_cnf(n2, n3, n4, use_complements, restrict_functions)
         if cnf is None:
@@ -284,6 +288,11 @@ def try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats
             total_decisions = 0
 
             while True:
+                # Check early termination
+                if stop_event and stop_event.is_set():
+                    elapsed = time.time() - start
+                    return None, cost, f"Cancelled ({elapsed:.1f}s, {total_conflicts} conflicts)", (n2, n3, n4)
+
                 sat_solver.conf_budget(conflict_budget)
                 status = sat_solver.solve_limited()
 
@@ -326,8 +335,8 @@ def try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats
 
 def try_config(args):
     """Try a single (n2, n3, n4) configuration. Run in separate process."""
-    n2, n3, n4, use_complements, restrict_functions, stats_queue = args
-    return try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats_queue)
+    n2, n3, n4, use_complements, restrict_functions, stats_queue, stop_event = args
+    return try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats_queue, stop_event)
 
 
 def worker_init():
@@ -478,9 +487,10 @@ def main():
     configs_tested = 0
     total_configs = len(configs)
 
-    # Create shared queue for stats
+    # Create shared queue for stats and stop event for early termination
     manager = Manager()
     stats_queue = manager.Queue()
+    stop_event = manager.Event()
     progress.stats_queue = stats_queue
 
     with ProcessPoolExecutor(max_workers=mp.cpu_count(), initializer=worker_init) as executor:
@@ -506,8 +516,9 @@ def main():
             # Start async progress display
             progress.start(group_size, cost)
 
-            # Add stats_queue to each config
-            configs_with_queue = [(cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], stats_queue) for cfg in group]
+            # Add stats_queue and stop_event to each config
+            stop_event.clear()  # Reset for new cost group
+            configs_with_queue = [(cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], stats_queue, stop_event) for cfg in group]
             futures = {executor.submit(try_config, cfg): cfg for cfg in configs_with_queue}
             found_solution = False
 
@@ -536,6 +547,8 @@ def main():
                                 best_result = result
                                 best_cost = result_cost
                                 found_solution = True
+                                # Signal other workers to stop
+                                stop_event.set()
                                 for f in futures:
                                     f.cancel()
                                 break
