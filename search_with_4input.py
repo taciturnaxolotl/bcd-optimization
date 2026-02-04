@@ -7,9 +7,14 @@ import multiprocessing as mp
 from multiprocessing import Manager
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import sys
+import os
 import time
 import threading
 import queue
+import termios
+import tty
+import signal
+import atexit
 
 from bcd_optimization.solver import BCDTo7SegmentSolver
 from bcd_optimization.truth_tables import SEGMENT_MINTERMS, SEGMENT_NAMES
@@ -23,6 +28,8 @@ CYAN = "\033[96m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+HIDE_CURSOR = "\033[?25l"
+SHOW_CURSOR = "\033[?25h"
 
 
 class ProgressDisplay:
@@ -33,6 +40,7 @@ class ProgressDisplay:
         self.running = False
         self.thread = None
         self.stats_queue = stats_queue
+        self.original_termios = None
 
         # State
         self.completed = 0
@@ -49,6 +57,29 @@ class ProgressDisplay:
         self.total_vars = 0
         self.total_clauses = 0
 
+    def _disable_input(self):
+        """Disable keyboard echo and hide cursor."""
+        try:
+            self.original_termios = termios.tcgetattr(sys.stdin)
+            new_termios = termios.tcgetattr(sys.stdin)
+            new_termios[3] = new_termios[3] & ~termios.ECHO & ~termios.ICANON
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, new_termios)
+        except (termios.error, AttributeError):
+            pass
+        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.flush()
+
+    def _restore_input(self):
+        """Restore keyboard echo and show cursor."""
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.flush()
+        if self.original_termios:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, self.original_termios)
+            except (termios.error, AttributeError):
+                pass
+            self.original_termios = None
+
     def start(self, total, cost):
         """Start the progress display thread."""
         with self.lock:
@@ -63,6 +94,7 @@ class ProgressDisplay:
             self.total_decisions = 0
             self.running = True
 
+        self._disable_input()
         self.thread = threading.Thread(target=self._update_loop, daemon=True)
         self.thread.start()
 
@@ -71,6 +103,7 @@ class ProgressDisplay:
         self.running = False
         if self.thread:
             self.thread.join(timeout=0.5)
+        self._restore_input()
         # Clear the line
         print(f"\r{CLEAR_LINE}", end="", flush=True)
 
@@ -297,6 +330,11 @@ def try_config(args):
     return try_config_with_stats(n2, n3, n4, use_complements, restrict_functions, stats_queue)
 
 
+def worker_init():
+    """Initialize worker process to ignore SIGINT (parent handles it)."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def verify_result(result):
     """Verify a synthesis result is correct."""
     def eval_func2(func, a, b):
@@ -337,7 +375,64 @@ def verify_result(result):
     return True, "All correct"
 
 
+def cleanup_terminal():
+    """Restore terminal to normal state."""
+    sys.stdout.write(SHOW_CURSOR)
+    sys.stdout.flush()
+
+
 def main():
+    # Register cleanup to ensure cursor is always restored
+    atexit.register(cleanup_terminal)
+
+    # Store original terminal settings for signal handler
+    original_termios = None
+    try:
+        original_termios = termios.tcgetattr(sys.stdin)
+    except (termios.error, AttributeError):
+        pass
+
+    # Create progress display early so signal handler can access it
+    progress = ProgressDisplay(None)  # Queue set later
+    executor_ref = [None]  # Mutable container for executor reference
+    # State for signal handler status message
+    search_state = {
+        'start_time': 0,
+        'group_start': 0,
+        'configs_tested': 0,
+        'current_cost': 0,
+        'group_completed': 0,
+        'group_size': 0,
+    }
+
+    def signal_handler(signum, frame):
+        """Handle interrupt signals gracefully."""
+        # Stop progress display first to prevent overwrites
+        progress.running = False
+        if progress.thread:
+            progress.thread.join(timeout=0.2)
+        # Shutdown executor without waiting
+        if executor_ref[0]:
+            executor_ref[0].shutdown(wait=False, cancel_futures=True)
+        # Restore terminal
+        sys.stdout.write(f"\r{CLEAR_LINE}")
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.flush()
+        if original_termios:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, original_termios)
+            except (termios.error, AttributeError):
+                pass
+        # Print status message
+        elapsed = time.time() - search_state['group_start'] if search_state['group_start'] else 0
+        conflicts = progress.total_conflicts
+        print(f"  {YELLOW}● Interrupted at {search_state['group_completed']}/{search_state['group_size']} configurations{RESET} ({elapsed:.1f}s, {conflicts} conflicts)")
+        print(f"\n{YELLOW}Search interrupted by user{RESET}")
+        os._exit(0)  # Hard exit to avoid cleanup errors from child processes
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     print(f"{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}BCD to 7-Segment Optimal Circuit Search (with 4-input gates){RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}")
@@ -379,16 +474,17 @@ def main():
     best_cost = float('inf')
 
     total_start = time.time()
+    search_state['start_time'] = total_start
     configs_tested = 0
     total_configs = len(configs)
 
     # Create shared queue for stats
     manager = Manager()
     stats_queue = manager.Queue()
+    progress.stats_queue = stats_queue
 
-    progress = ProgressDisplay(stats_queue)
-
-    with ProcessPoolExecutor(max_workers=mp.cpu_count()) as executor:
+    with ProcessPoolExecutor(max_workers=mp.cpu_count(), initializer=worker_init) as executor:
+        executor_ref[0] = executor
         for cost in sorted(cost_groups.keys()):
             if cost >= best_cost:
                 continue
@@ -397,6 +493,12 @@ def main():
             group_size = len(group)
             group_start = time.time()
             completed_in_group = 0
+
+            # Update state for signal handler
+            search_state['current_cost'] = cost
+            search_state['group_size'] = group_size
+            search_state['group_completed'] = 0
+            search_state['group_start'] = group_start
 
             print(f"\n{CYAN}{BOLD}Testing {cost} inputs{RESET} ({group_size} configurations)")
             print("-" * 50)
@@ -414,6 +516,8 @@ def main():
                 n2, n3, n4 = cfg[0], cfg[1], cfg[2]  # First 3 elements are gate counts
                 completed_in_group += 1
                 configs_tested += 1
+                search_state['group_completed'] = completed_in_group
+                search_state['configs_tested'] = configs_tested
                 config_str = f"{n2}x2+{n3}x3+{n4}x4"
 
                 try:
