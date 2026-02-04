@@ -1,0 +1,81 @@
+digraph BCD_7Seg {
+    label="BCD to 7-Segment Decoder\n22 gate inputs (8x2-input + 2x3-input)";
+    labelloc="t";
+    fontsize=16;
+    rankdir=LR;
+    splines=ortho;
+    nodesep=0.5;
+    ranksep=1.0;
+
+    subgraph cluster_inputs {
+        label="Inputs";
+        style=dashed;
+        A [shape=circle, style=filled, fillcolor=lightblue, label="A"];
+        B [shape=circle, style=filled, fillcolor=lightblue, label="B"];
+        C [shape=circle, style=filled, fillcolor=lightblue, label="C"];
+        D [shape=circle, style=filled, fillcolor=lightblue, label="D"];
+        nA [shape=circle, style=filled, fillcolor=lightcyan, label="A'"];
+        nB [shape=circle, style=filled, fillcolor=lightcyan, label="B'"];
+        nC [shape=circle, style=filled, fillcolor=lightcyan, label="C'"];
+        nD [shape=circle, style=filled, fillcolor=lightcyan, label="D'"];
+    }
+
+    subgraph cluster_gates {
+        label="Logic Gates";
+        style=dashed;
+        g0 [shape=box, style=filled, fillcolor=peachpuff, label="NOR"];
+        g1 [shape=box, style=filled, fillcolor=lightyellow, label="XOR"];
+        g2 [shape=box, style=filled, fillcolor=lightyellow, label="XOR"];
+        g3 [shape=box, style=filled, fillcolor=palegreen, label="NAND"];
+        g4 [shape=box, style=filled, fillcolor=palegreen, label="NAND"];
+        g5 [shape=box, style=filled, fillcolor=lightsalmon, label="OR"];
+        g6 [shape=box, style=filled, fillcolor=lightgreen, label="AND"];
+        g7 [shape=box, style=filled, fillcolor=lightsalmon, label="OR"];
+        g8 [shape=box, style=filled, fillcolor=coral, label="OR3"];
+        g9 [shape=box, style=filled, fillcolor=plum, label="SPECIAL"];
+    }
+
+    // Connections
+    A -> g0;
+    C -> g0;
+    B -> g1;
+    g0 -> g1;
+    D -> g2;
+    g1 -> g2;
+    B -> g3;
+    g2 -> g3;
+    g1 -> g4;
+    g3 -> g4;
+    g0 -> g5 [taillabel="'"];
+    g2 -> g5;
+    nD -> g6;
+    g5 -> g6;
+    g2 -> g7;
+    g6 -> g7;
+    nA -> g8 [taillabel="'"];
+    g2 -> g8;
+    g6 -> g8;
+    D -> g9;
+    nC -> g9;
+    g2 -> g9;
+
+    subgraph cluster_outputs {
+        label="Outputs";
+        style=dashed;
+        out_a [shape=doublecircle, style=filled, fillcolor=lightpink, label="a"];
+        out_b [shape=doublecircle, style=filled, fillcolor=lightpink, label="b"];
+        out_c [shape=doublecircle, style=filled, fillcolor=lightpink, label="c"];
+        out_d [shape=doublecircle, style=filled, fillcolor=lightpink, label="d"];
+        out_e [shape=doublecircle, style=filled, fillcolor=lightpink, label="e"];
+        out_f [shape=doublecircle, style=filled, fillcolor=lightpink, label="f"];
+        out_g [shape=doublecircle, style=filled, fillcolor=lightpink, label="g"];
+    }
+
+    g5 -> out_a;
+    g3 -> out_b;
+    g8 -> out_c;
+    g7 -> out_d;
+    g6 -> out_e;
+    g9 -> out_f;
+    g4 -> out_g;
+}
