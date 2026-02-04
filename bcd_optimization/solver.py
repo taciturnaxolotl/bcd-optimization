@@ -599,6 +599,301 @@ class BCDTo7SegmentSolver:
         }
         return known.get(func, f"F4_{func:016b}")
 
+    def _build_general_cnf(self, num_2input: int, num_3input: int, num_4input: int,
+                           use_complements: bool = True, restrict_functions: bool = True) -> Optional[dict]:
+        """Build CNF for general synthesis without solving. Returns CNF + metadata for decoding."""
+        n_primary = 4
+        n_inputs = 8 if use_complements else 4
+        n_outputs = 7
+        n_gates = num_2input + num_3input + num_4input
+        n_nodes = n_inputs + n_gates
+
+        truth_rows = list(range(10))
+        n_rows = len(truth_rows)
+
+        clauses = []
+        var_counter = [1]
+
+        def new_var():
+            v = var_counter[0]
+            var_counter[0] += 1
+            return v
+
+        # x[i][t] = output of node i on row t
+        x = {i: {t: new_var() for t in range(n_rows)} for i in range(n_nodes)}
+
+        # Selection and function variables
+        s2, s3, s4 = {}, {}, {}
+        f2, f3, f4 = {}, {}, {}
+
+        gate_sizes = [2] * num_2input + [3] * num_3input + [4] * num_4input
+
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            size = gate_sizes[gate_idx]
+
+            if size == 2:
+                s2[i] = {}
+                for j in range(i):
+                    s2[i][j] = {k: new_var() for k in range(j + 1, i)}
+                f2[i] = {p: {q: new_var() for q in range(2)} for p in range(2)}
+            elif size == 3:
+                s3[i] = {}
+                for j in range(i):
+                    s3[i][j] = {}
+                    for k in range(j + 1, i):
+                        s3[i][j][k] = {l: new_var() for l in range(k + 1, i)}
+                f3[i] = {p: {q: {r: new_var() for r in range(2)} for q in range(2)} for p in range(2)}
+            else:
+                s4[i] = {}
+                for j in range(i):
+                    s4[i][j] = {}
+                    for k in range(j + 1, i):
+                        s4[i][j][k] = {}
+                        for l in range(k + 1, i):
+                            s4[i][j][k][l] = {m: new_var() for m in range(l + 1, i)}
+                f4[i] = {p: {q: {r: {s: new_var() for s in range(2)} for r in range(2)} for q in range(2)} for p in range(2)}
+
+        g = {h: {i: new_var() for i in range(n_nodes)} for h in range(n_outputs)}
+
+        # Constraint 1: Primary inputs
+        for t_idx, t in enumerate(truth_rows):
+            for i in range(n_primary):
+                bit = (t >> (n_primary - 1 - i)) & 1
+                clauses.append([x[i][t_idx] if bit else -x[i][t_idx]])
+            if use_complements:
+                for i in range(n_primary):
+                    bit = (t >> (n_primary - 1 - i)) & 1
+                    clauses.append([x[n_primary + i][t_idx] if not bit else -x[n_primary + i][t_idx]])
+
+        # Constraint 2: Each gate has exactly one input selection
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            size = gate_sizes[gate_idx]
+
+            if size == 2:
+                all_sels = [s2[i][j][k] for j in range(i) for k in range(j + 1, i)]
+            elif size == 3:
+                all_sels = [s3[i][j][k][l] for j in range(i) for k in range(j + 1, i) for l in range(k + 1, i)]
+            else:
+                all_sels = [s4[i][j][k][l][m] for j in range(i) for k in range(j + 1, i) for l in range(k + 1, i) for m in range(l + 1, i)]
+
+            if not all_sels:
+                return None
+
+            clauses.append(all_sels)
+            for idx1, sel1 in enumerate(all_sels):
+                for sel2 in all_sels[idx1 + 1:]:
+                    clauses.append([-sel1, -sel2])
+
+        # Constraint 3: Gate function consistency
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            size = gate_sizes[gate_idx]
+
+            if size == 2:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for t_idx in range(n_rows):
+                            for pv in range(2):
+                                for qv in range(2):
+                                    for outv in range(2):
+                                        clause = [-s2[i][j][k]]
+                                        clause.append(-x[j][t_idx] if pv else x[j][t_idx])
+                                        clause.append(-x[k][t_idx] if qv else x[k][t_idx])
+                                        clause.append(-f2[i][pv][qv] if outv else f2[i][pv][qv])
+                                        clause.append(x[i][t_idx] if outv else -x[i][t_idx])
+                                        clauses.append(clause)
+            elif size == 3:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            for t_idx in range(n_rows):
+                                for pv in range(2):
+                                    for qv in range(2):
+                                        for rv in range(2):
+                                            for outv in range(2):
+                                                clause = [-s3[i][j][k][l]]
+                                                clause.append(-x[j][t_idx] if pv else x[j][t_idx])
+                                                clause.append(-x[k][t_idx] if qv else x[k][t_idx])
+                                                clause.append(-x[l][t_idx] if rv else x[l][t_idx])
+                                                clause.append(-f3[i][pv][qv][rv] if outv else f3[i][pv][qv][rv])
+                                                clause.append(x[i][t_idx] if outv else -x[i][t_idx])
+                                                clauses.append(clause)
+            else:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            for m in range(l + 1, i):
+                                for t_idx in range(n_rows):
+                                    for pv in range(2):
+                                        for qv in range(2):
+                                            for rv in range(2):
+                                                for sv in range(2):
+                                                    for outv in range(2):
+                                                        clause = [-s4[i][j][k][l][m]]
+                                                        clause.append(-x[j][t_idx] if pv else x[j][t_idx])
+                                                        clause.append(-x[k][t_idx] if qv else x[k][t_idx])
+                                                        clause.append(-x[l][t_idx] if rv else x[l][t_idx])
+                                                        clause.append(-x[m][t_idx] if sv else x[m][t_idx])
+                                                        clause.append(-f4[i][pv][qv][rv][sv] if outv else f4[i][pv][qv][rv][sv])
+                                                        clause.append(x[i][t_idx] if outv else -x[i][t_idx])
+                                                        clauses.append(clause)
+
+        # Constraint 3b: Restrict functions
+        if restrict_functions:
+            allowed_2input = [0b1000, 0b1110, 0b0110, 0b1001, 0b0111, 0b0001]
+            allowed_3input = [0b10000000, 0b11111110, 0b01111111, 0b00000001, 0b10010110, 0b01101001]
+            allowed_4input = [0x8000, 0xFFFE, 0x7FFF, 0x0001, 0x6996, 0x9669]
+
+            for gate_idx in range(n_gates):
+                i = n_inputs + gate_idx
+                size = gate_sizes[gate_idx]
+
+                if size == 2:
+                    or_clause = []
+                    for func in allowed_2input:
+                        match_var = new_var()
+                        or_clause.append(match_var)
+                        for p in range(2):
+                            for q in range(2):
+                                bit_idx = p * 2 + q
+                                expected = (func >> bit_idx) & 1
+                                clauses.append([-match_var, f2[i][p][q] if expected else -f2[i][p][q]])
+                    clauses.append(or_clause)
+                elif size == 3:
+                    or_clause = []
+                    for func in allowed_3input:
+                        match_var = new_var()
+                        or_clause.append(match_var)
+                        for p in range(2):
+                            for q in range(2):
+                                for r in range(2):
+                                    bit_idx = p * 4 + q * 2 + r
+                                    expected = (func >> bit_idx) & 1
+                                    clauses.append([-match_var, f3[i][p][q][r] if expected else -f3[i][p][q][r]])
+                    clauses.append(or_clause)
+                else:
+                    or_clause = []
+                    for func in allowed_4input:
+                        match_var = new_var()
+                        or_clause.append(match_var)
+                        for p in range(2):
+                            for q in range(2):
+                                for r in range(2):
+                                    for s in range(2):
+                                        bit_idx = p * 8 + q * 4 + r * 2 + s
+                                        expected = (func >> bit_idx) & 1
+                                        clauses.append([-match_var, f4[i][p][q][r][s] if expected else -f4[i][p][q][r][s]])
+                    clauses.append(or_clause)
+
+        # Constraint 4: Each output assigned to exactly one node
+        for h in range(n_outputs):
+            clauses.append([g[h][i] for i in range(n_nodes)])
+            for i in range(n_nodes):
+                for j in range(i + 1, n_nodes):
+                    clauses.append([-g[h][i], -g[h][j]])
+
+        # Constraint 5: Output correctness
+        for h, segment in enumerate(SEGMENT_NAMES):
+            for t_idx, t in enumerate(truth_rows):
+                expected = 1 if t in SEGMENT_MINTERMS[segment] else 0
+                for i in range(n_nodes):
+                    clauses.append([-g[h][i], x[i][t_idx] if expected else -x[i][t_idx]])
+
+        return {
+            'clauses': clauses,
+            'n_vars': var_counter[0] - 1,
+            'gate_sizes': gate_sizes,
+            'n_inputs': n_inputs,
+            'n_nodes': n_nodes,
+            'use_complements': use_complements,
+            'x': x, 's2': s2, 's3': s3, 's4': s4,
+            'f2': f2, 'f3': f3, 'f4': f4, 'g': g,
+        }
+
+    def _decode_general_solution_from_cnf(self, model: set, cnf_data: dict) -> SynthesisResult:
+        """Decode a SAT solution using stored CNF metadata."""
+        def is_true(var):
+            return var in model
+
+        gate_sizes = cnf_data['gate_sizes']
+        n_inputs = cnf_data['n_inputs']
+        n_nodes = cnf_data['n_nodes']
+        use_complements = cnf_data['use_complements']
+        s2, s3, s4 = cnf_data['s2'], cnf_data['s3'], cnf_data['s4']
+        f2, f3, f4 = cnf_data['f2'], cnf_data['f3'], cnf_data['f4']
+        g = cnf_data['g']
+
+        n_gates = len(gate_sizes)
+        if use_complements:
+            node_names = ['A', 'B', 'C', 'D', "A'", "B'", "C'", "D'"] + [f'g{i}' for i in range(n_gates)]
+        else:
+            node_names = ['A', 'B', 'C', 'D'] + [f'g{i}' for i in range(n_gates)]
+
+        gates = []
+        total_cost = 0
+
+        for gate_idx in range(n_gates):
+            i = n_inputs + gate_idx
+            size = gate_sizes[gate_idx]
+            total_cost += size
+
+            if size == 2:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        if is_true(s2[i][j][k]):
+                            func = sum((1 << (p * 2 + q)) for p in range(2) for q in range(2) if is_true(f2[i][p][q]))
+                            func_name = self._decode_gate_function(func)
+                            gates.append(GateInfo(index=gate_idx, input1=j, input2=k, func=func, func_name=func_name))
+                            node_names[i] = f"({node_names[j]} {func_name} {node_names[k]})"
+                            break
+            elif size == 3:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            if is_true(s3[i][j][k][l]):
+                                func = sum((1 << (p * 4 + q * 2 + r)) for p in range(2) for q in range(2) for r in range(2) if is_true(f3[i][p][q][r]))
+                                func_name = self._decode_3input_function(func)
+                                gates.append(GateInfo(index=gate_idx, input1=j, input2=(k, l), func=func, func_name=func_name))
+                                node_names[i] = f"({node_names[j]} {func_name} {node_names[k]} {node_names[l]})"
+                                break
+            else:
+                for j in range(i):
+                    for k in range(j + 1, i):
+                        for l in range(k + 1, i):
+                            for m in range(l + 1, i):
+                                if is_true(s4[i][j][k][l][m]):
+                                    func = sum((1 << (p * 8 + q * 4 + r * 2 + s)) for p in range(2) for q in range(2) for r in range(2) for s in range(2) if is_true(f4[i][p][q][r][s]))
+                                    func_name = self._decode_4input_function(func)
+                                    gates.append(GateInfo(index=gate_idx, input1=j, input2=(k, l, m), func=func, func_name=func_name))
+                                    node_names[i] = f"({node_names[j]} {func_name} {node_names[k]} {node_names[l]} {node_names[m]})"
+                                    break
+
+        output_map = {}
+        expressions = {}
+        for h, segment in enumerate(SEGMENT_NAMES):
+            for i in range(n_nodes):
+                if is_true(g[h][i]):
+                    output_map[segment] = i
+                    expressions[segment] = node_names[i]
+                    break
+
+        num_2 = gate_sizes.count(2)
+        num_3 = gate_sizes.count(3)
+        num_4 = gate_sizes.count(4)
+
+        return SynthesisResult(
+            cost=total_cost,
+            implicants_by_output={},
+            shared_implicants=[],
+            method=f"exact_general_{num_2}x2_{num_3}x3_{num_4}x4",
+            expressions=expressions,
+            cost_breakdown=CostBreakdown(and_inputs=total_cost, or_inputs=0, num_and_gates=n_gates, num_or_gates=0),
+            gates=gates,
+            output_map=output_map,
+        )
+
     def _try_general_synthesis(self, num_2input: int, num_3input: int, num_4input: int,
                                 use_complements: bool = True, restrict_functions: bool = True) -> Optional[SynthesisResult]:
         """Try synthesis with a mix of 2, 3, and 4-input gates."""
